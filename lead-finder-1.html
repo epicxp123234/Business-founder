@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lead Finder</title>
+<style>
+  :root { --bg:#eef2f4; --ink:#14232b; --mute:#5b6b74; --line:#cfd8dd; --card:#fff; --acc:#0b6e6e; --accInk:#fff; --warn:#a4380f; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:960px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { font-size:26px; margin:8px 0 4px; letter-spacing:-.01em; }
+  p.sub { margin:0 0 18px; color:var(--mute); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:14px; }
+  label { display:block; font-weight:600; margin-bottom:6px; }
+  input, textarea { width:100%; padding:12px; font:inherit; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink); }
+  textarea { min-height:84px; resize:vertical; }
+  input:focus, textarea:focus, button:focus-visible { outline:3px solid #7ac4c4; outline-offset:1px; }
+  button { font:inherit; font-weight:600; padding:12px 18px; border-radius:8px; border:1px solid var(--acc); background:var(--acc); color:var(--accInk); cursor:pointer; }
+  button.ghost { background:#fff; color:var(--acc); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  .hint { color:var(--mute); font-size:14px; margin-top:6px; }
+  #status { white-space:pre-line; }
+  #status.err { color:var(--warn); font-weight:600; }
+  .tablewrap { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; min-width:640px; font-size:15px; }
+  th, td { text-align:left; padding:10px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-weight:600; color:var(--mute); font-size:14px; }
+  a { color:var(--acc); }
+  .hidden { display:none; }
+  details summary { cursor:pointer; font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lead Finder</h1>
+  <p class="sub">Find local businesses that have no website listed, with their phone and email when public.</p>
+
+  <section>
+    <details id="keybox">
+      <summary>Gemini key</summary>
+      <div style="margin-top:10px">
+        <input id="key" type="password" placeholder="Paste your Gemini API key" autocomplete="off">
+        <div class="row"><button id="savekey" class="ghost">Save key</button><span id="keymsg" class="hint"></span></div>
+        <p class="hint">The key is stored only in this browser. Get one at Google AI Studio.</p>
+      </div>
+    </details>
+  </section>
+
+  <section>
+    <label for="ask">What businesses do you want?</label>
+    <textarea id="ask" placeholder="Find 50 dentists in Delhi"></textarea>
+    <div class="row">
+      <button id="go">Search</button>
+      <button id="csv" class="ghost hidden">Download CSV</button>
+      <button id="copy" class="ghost hidden">Copy for Sheets</button>
+    </div>
+    <p class="hint">Only businesses with a phone or email listed are kept. Businesses with a phone and an email come first.</p>
+  </section>
+
+  <section id="statusbox" class="hidden"><div id="status"></div></section>
+
+  <section id="resbox" class="hidden">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Business</th><th>Phone</th><th>Email</th><th>Address</th><th>Social page</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p class="hint">"No website" means OpenStreetMap has none recorded. Some businesses may still have one, so verify before contacting them.</p>
+  </section>
+</main>
+
+<script>
+const MODEL = 'gemini-3.6-flash';
+const DEFAULT_LIMIT = 50, MAX_LIMIT = 500;
+const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+const $ = id => document.getElementById(id);
+let results = [];
+
+function store(k, v) {
+  try {
+    if (v === undefined) return localStorage.getItem(k);
+    localStorage.setItem(k, v);
+  } catch (e) { return null; }
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[c]));
+}
+
+function status(msg, isErr) {
+  $('statusbox').classList.remove('hidden');
+  const s = $('status');
+  s.textContent = msg;
+  s.className = isErr ? 'err' : '';
+}
+
+const savedKey = store('gemini_key');
+if (savedKey) {
+  $('key').value = savedKey;
+  $('keymsg').textContent = 'Key saved.';
+} else {
+  $('keybox').open = true;
+}
+
+$('savekey').onclick = () => {
+  const key = $('key').value.trim();
+  if (!key) {
+    $('keymsg').textContent = 'Enter a key first.';
+    return;
+  }
+  store('gemini_key', key);
+  $('keymsg').textContent = 'Key saved.';
+};
+
+async function parseRequest(text, key) {
+  const prompt =
+    'Convert this request into search parameters for OpenStreetMap. ' +
+    'Only fill values the user actually stated. ' +
+    'Use null for limit if not stated. ' +
+    'Include the country in location if obvious (e.g. "Delhi, India"). ' +
+    'tags: 1 to 3 OpenStreetMap key/value pairs matching the business type. ' +
+    'Examples: dentist = amenity:dentist; ' +
+    'restaurant = amenity:restaurant; salon = shop:hairdresser and shop:beauty; ' +
+    'plumber = craft:plumber; gym = leisure:fitness_centre; ' +
+    'clinic = amenity:clinic; doctor = amenity:doctors; pharmacy = amenity:pharmacy; ' +
+    'bakery = shop:bakery; cafe = amenity:cafe.\n\nRequest: ' + text;
+
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          business_type: { type: 'STRING' },
+          location: { type: 'STRING' },
+          limit: { type: 'INTEGER', nullable: true },
+          tags: {
+            type: 'ARRAY',
+            items: {
+              type: 'OBJECT',
+              properties: {
+                key: { type: 'STRING' },
+                value: { type: 'STRING' }
+              },
+              required: ['key', 'value']
+            }
+          }
+        },
+        required: ['business_type', 'location', 'tags']
+      }
+    }
+  };
+
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + MODEL + ':generateContent';
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const t = (await res.text()).slice(0, 500);
+    let message = 'Gemini error ' + res.status + '. ';
+    if (res.status === 400) message += 'The request was invalid. ';
+    if (res.status === 401 || res.status === 403) message += 'Check that your Gemini API key is valid and has access to the model. ';
+    if (res.status === 404) message += 'The Gemini model endpoint was not found. Current configured model: ' + MODEL + '. ';
+    throw new Error(message + t);
+  }
+
+  let json;
+  try {
+    json = await res.json();
+  } catch (e) {
+    throw new Error('Gemini returned an invalid response.');
+  }
+
+  let out;
+  try {
+    const generatedText = json.candidates[0].content.parts[0].text;
+    out = JSON.parse(generatedText);
+  } catch (e) {
+    console.error('Gemini response:', json);
+    throw new Error('Could not understand the request. Try rewording it.');
+  }
+
+  if (!out.business_type || !out.location) {
+    throw new Error('Please mention both a business type and a location.');
+  }
+
+  const tags = (out.tags || [])
+    .filter(t => /^[a-z_:]+$/.test(t.key) && /^[a-z_]+$/.test(t.value))
+    .slice(0, 3);
+
+  if (!tags.length) {
+    throw new Error('Could not map that business type to OpenStreetMap. Try a simpler type.');
+  }
+
+  let limit = (typeof out.limit === 'number' && out.limit > 0)
+    ? Math.floor(out.limit)
+    : DEFAULT_LIMIT;
+
+  limit = Math.min(limit, MAX_LIMIT);
+
+  return {
+    type: String(out.business_type).trim(),
+    location: String(out.location).trim(),
+    limit,
+    tags
+  };
+}
+
+async function geocode(place) {
+  const res = await fetch(
+    'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' +
+    encodeURIComponent(place)
+  );
+
+  if (!res.ok) {
+    throw new Error('Location lookup failed (' + res.status + '). Try again in a minute.');
+  }
+
+  const list = await res.json();
+
+  if (!list.length) {
+    throw new Error('Could not find "' + place + '". Try adding the country.');
+  }
+
+  const r = list[0];
+
+  if (r.osm_type === 'relation') {
+    return { area: 3600000000 + Number(r.osm_id) };
+  }
+
+  if (r.osm_type === 'way') {
+    return { area: 2400000000 + Number(r.osm_id) };
+  }
+
+  const b = r.boundingbox.map(Number);
+
+  return { bbox: b[0] + ',' + b[2] + ',' + b[1] + ',' + b[3] };
+}
+
+async function queryOverpass(tags, loc) {
+  const scope = loc.area ? '(area.a)' : '(' + loc.bbox + ')';
+
+  const parts = tags.map(t =>
+    'nwr["' + t.key + '"="' + t.value + '"]["name"][!"website"][!"contact:website"][!"url"]' +
+    scope + ';'
+  ).join('\n');
+
+  const q =
+    '[out:json][timeout:50];\n' +
+    (loc.area ? 'area(' + loc.area + ')->.a;\n' : '') +
+    '(\n' + parts + '\n);\nout center tags 1500;';
+
+  let last = '';
+
+  for (const url of OVERPASS) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'data=' + encodeURIComponent(q)
+      });
+
+      if (res.ok) return (await res.json()).elements || [];
+      last = 'HTTP ' + res.status;
+    } catch (e) {
+      last = 'network error';
+    }
+  }
+
+  throw new Error(
+    'OpenStreetMap server is busy or the area is too big (' +
+    last +
+    '). Try again in a minute or use a smaller area.'
+  );
+}
+
+function build(elements, p) {
+  const seen = new Set();
+  let dupes = 0;
+  let noContact = 0;
+  const found = [];
+  const today = new Date().toISOString().slice(0, 10);
+
+  for (const el of elements) {
+    const t = el.tags || {};
+    if (!t.name) continue;
+
+    const id = el.type + '/' + el.id;
+
+    if (seen.has(id)) {
+      dupes++;
+      continue;
+    }
+
+    const phone =
+      t.phone ||
+      t['contact:phone'] ||
+      t.mobile ||
+      t['contact:mobile'] ||
+      '';
+
+    const email =
+      t.email ||
+      t['contact:email'] ||
+      '';
+
+    if (!phone && !email) {
+      noContact++;
+      continue;
+    }
+
+    seen.add(id);
+
+    const address = [
+      t['addr:housenumber'],
+      t['addr:street'],
+      t['addr:suburb'],
+      t['addr:city'],
+      t['addr:postcode']
+    ].filter(Boolean).join(', ');
+
+    const social =
+      t['contact:facebook'] ||
+      t['contact:instagram'] ||
+      t.facebook ||
+      t.instagram ||
+      '';
+
+    found.push({
+      score: (email ? 2 : 0) + (phone ? 1 : 0),
+      name: t.name,
+      category: p.type,
+      address,
+      phone,
+      email,
+      social,
+      websiteStatus: 'No website listed',
+      osmId: id,
+      date: today,
+      source: 'OpenStreetMap'
+    });
+  }
+
+  found.sort((a, b) => b.score - a.score);
+
+  return {
+    rows: found.slice(0, p.limit),
+    dupes,
+    noContact
+  };
+}
+
+function render(rows) {
+  $('rows').innerHTML = rows.map(r => {
+    const tel = r.phone
+      ? '<a href="tel:' + esc(r.phone.replace(/[^\d+]/g, '')) + '">' + esc(r.phone) + '</a>'
+      : '';
+
+    const mail = r.email
+      ? '<a href="mailto:' + esc(r.email) + '">' + esc(r.email) + '</a>'
+      : '';
+
+    const soc = r.social
+      ? (/^https?:/i.test(r.social)
+          ? '<a href="' + esc(r.social) + '" target="_blank" rel="noopener">link</a>'
+          : esc(r.social))
+      : '';
+
+    return '<tr>' +
+      '<td>' + esc(r.name) + '</td>' +
+      '<td>' + tel + '</td>' +
+      '<td>' + mail + '</td>' +
+      '<td>' + esc(r.address) + '</td>' +
+      '<td>' + soc + '</td>' +
+      '</tr>';
+  }).join('');
+
+  $('resbox').classList.toggle('hidden', !rows.length);
+  $('csv').classList.toggle('hidden', !rows.length);
+  $('copy').classList.toggle('hidden', !rows.length);
+}
+
+const COLS = [
+  ['Business Name','name'],
+  ['Category','category'],
+  ['Address','address'],
+  ['Phone','phone'],
+  ['Email','email'],
+  ['Social Page','social'],
+  ['Website Status','websiteStatus'],
+  ['OSM ID','osmId'],
+  ['Date Found','date'],
+  ['Source','source']
+];
+
+$('go').onclick = async () => {
+  const key = ($('key').value || '').trim();
+  const text = ($('ask').value || '').trim();
+
+  if (!key) {
+    $('keybox').open = true;
+    return status('Paste your Gemini API key first.', true);
+  }
+
+  if (!text) {
+    return status(
+      'Type what businesses you want, for example: Find 50 dentists in Delhi',
+      true
+    );
+  }
+
+  store('gemini_key', key);
+
+  $('go').disabled = true;
+  results = [];
+  render([]);
+
+  try {
+    status('Understanding your request...');
+
+    const p = await parseRequest(text, key);
+
+    status(
+      'Searching for ' + p.type + ' in ' + p.location +
+      '\nTarget: ' + p.limit +
+      '\nFinding the place on the map...'
+    );
+
+    const loc = await geocode(p.location);
+
+    status(
+      'Searching OpenStreetMap. This can take up to a minute for big cities...'
+    );
+
+    const els = await queryOverpass(p.tags, loc);
+    const out = build(els, p);
+
+    results = out.rows;
+    render(results);
+
+    let msg =
+      'Businesses without a website: ' + els.length +
+      '\nKept (with phone or email): ' + results.length +
+      '\nSkipped (no phone or email): ' + out.noContact +
+      '\nDuplicates skipped: ' + out.dupes;
+
+    if (results.length < p.limit) {
+      msg +=
+        '\n\nOnly ' + results.length + ' of ' + p.limit +
+        ' found. OpenStreetMap returned no more matching businesses for this area.';
+    }
+
+    status(msg);
+
+  } catch (e) {
+    status(String(e.message || e), true);
+  }
+
+  $('go').disabled = false;
+};
+
+$('csv').onclick = () => {
+  const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+
+  const lines = [
+    COLS.map(c => q(c[0])).join(',')
+  ].concat(
+    results.map(r => COLS.map(c => q(r[c[1]])).join(','))
+  );
+
+  const blob = new Blob(
+    ['\ufeff' + lines.join('\n')],
+    { type: 'text/csv;charset=utf-8' }
+  );
+
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'leads.csv';
+
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+};
+
+$('copy').onclick = async () => {
+  const clean = v =>
+    String(v == null ? '' : v).replace(/[\t\r\n]+/g, ' ');
+
+  const tsv = [
+    COLS.map(c => c[0]).join('\t')
+  ].concat(
+    results.map(r =>
+      COLS.map(c => clean(r[c[1]])).join('\t')
+    )
+  ).join('\n');
+
+  try {
+    await navigator.clipboard.writeText(tsv);
+    status('Copied. Open a Google Sheet, tap a cell, and paste.');
+  } catch (e) {
+    status('Copy was blocked by the browser. Use Download CSV instead.', true);
+  }
+};
+</script>
+</body>
+</html>
