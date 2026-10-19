@@ -4,8 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lead Finder</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
-  :root { --bg:#e9eff1; --ink:#14232b; --mute:#5b6b74; --line:#cfd8dd; --card:#fff; --acc:#0b6e6e; --accDark:#08595a; --accInk:#fff; --warn:#a4380f; --soft:#f4f8f9; }
+  :root { --bg:#e9eff1; --ink:#14232b; --mute:#5b6b74; --line:#cfd8dd; --card:#fff; --acc:#0b6e6e; --accDark:#08595a; --accInk:#fff; --warn:#a4380f; --ok:#1d6b3a; --soft:#f4f8f9; }
   * { box-sizing:border-box; }
   html { -webkit-text-size-adjust:100%; }
   body { margin:0; min-height:100vh; background:var(--bg); color:var(--ink); font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
@@ -15,7 +16,7 @@
   p.sub { margin:0 auto; max-width:560px; color:var(--mute); font-size:clamp(15px,1.6vw,17px); }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:clamp(16px,2.4vw,26px); margin:0 auto 16px; }
   .narrow { max-width:720px; }
-  label { display:block; font-weight:600; margin-bottom:8px; }
+  label { display:block; font-weight:600; margin:12px 0 6px; }
   input, textarea { width:100%; padding:12px 14px; font:inherit; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink); }
   textarea { min-height:96px; resize:vertical; }
   input:focus, textarea:focus, button:focus-visible, summary:focus-visible { outline:3px solid #7ac4c4; outline-offset:1px; }
@@ -40,6 +41,14 @@
   .hidden { display:none !important; }
   .ask { background:var(--soft); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
   .ask p { margin:0; font-weight:600; }
+  .draft { border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+  .draft .top { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
+  .draft .top input[type=checkbox] { width:auto; }
+  .draft .to { font-weight:600; flex:1 1 200px; word-break:break-word; }
+  .draft textarea { min-height:170px; }
+  .draft .st { font-size:14px; color:var(--mute); }
+  .draft .st.sent { color:var(--ok); font-weight:600; }
+  .draft .st.fail { color:var(--warn); font-weight:600; }
   @media (max-width:720px) {
     table, thead, tbody, tr, td { display:block; width:100%; }
     thead { position:absolute; left:-9999px; }
@@ -57,7 +66,7 @@
 <div class="wrap">
   <header>
     <h1>Lead Finder</h1>
-    <p class="sub">Find local businesses with no website listed, with their phone and email when public.</p>
+    <p class="sub">Find local businesses with no website listed, with their phone and email when public. Then write and send short emails from your Gmail.</p>
   </header>
 
   <section class="card narrow">
@@ -72,7 +81,22 @@
   </section>
 
   <section class="card narrow">
-    <label for="ask">What businesses do you want?</label>
+    <details id="mailbox">
+      <summary>Gmail connection</summary>
+      <div style="margin-top:4px">
+        <label for="clientId">Google OAuth client ID</label>
+        <input id="clientId" placeholder="123456-abc.apps.googleusercontent.com" autocomplete="off">
+        <p class="hint">Create one in Google Cloud Console: APIs &amp; Services, Credentials, OAuth client ID, type Web application. Add this page's address under Authorized JavaScript origins. Enable the Gmail API. Under OAuth consent screen, add abhijeet9411singh@gmail.com as a test user.</p>
+        <div class="row">
+          <button id="connect">Connect Gmail</button>
+          <span id="mailmsg" class="hint" style="margin:0"></span>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <section class="card narrow">
+    <label for="ask" style="margin-top:0">What businesses do you want?</label>
     <textarea id="ask" placeholder="Find 50 dentists in Houston"></textarea>
     <div class="row">
       <button id="go">Search</button>
@@ -93,6 +117,29 @@
       </table>
     </div>
     <p class="hint">"No website" means OpenStreetMap has none recorded. Some businesses may still have one, so verify before contacting them.</p>
+  </section>
+
+  <section id="outbox" class="card hidden">
+    <div class="resHead"><h2 id="outTitle">Email these businesses</h2></div>
+    <label for="myName" style="margin-top:0">Your name</label>
+    <input id="myName" autocomplete="off">
+    <label for="offer">What do you want to add?</label>
+    <textarea id="offer" placeholder="For example: I build simple websites for small local businesses."></textarea>
+    <div class="row">
+      <button id="previewBtn">Show me the email</button>
+      <button id="stopBtn" class="ghost hidden">Stop</button>
+    </div>
+    <div id="sampleBox" class="ask hidden" style="margin-top:14px">
+      <p id="sampleHead" style="font-weight:400;color:var(--mute);font-size:14px"></p>
+      <p id="sampleSubj" style="margin-top:8px"></p>
+      <div id="sampleBody" style="white-space:pre-wrap;margin-top:6px"></div>
+      <p style="margin-top:14px">Is it alright?</p>
+      <div class="row" style="margin-top:8px">
+        <button id="yesBtn">Yes, send to all</button>
+        <button id="noBtn" class="ghost">No, write another</button>
+      </div>
+    </div>
+    <p id="outmsg" class="hint" style="white-space:pre-line"></p>
   </section>
 
   <section id="askbox" class="card narrow hidden">
@@ -119,10 +166,12 @@
 
 <script>
 const MODEL = 'gemini-3.6-flash';
+const SENDER = 'abhijeet9411singh@gmail.com';
+const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
 const DEFAULT_LIMIT = 50, MAX_LIMIT = 500;
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
 const $ = id => document.getElementById(id);
-let results = [], extras = [], showExtras = false;
+let results = [], extras = [], showExtras = false, lastP = null;
 
 function store(k, v) {
   try {
@@ -150,6 +199,8 @@ $('savekey').onclick = () => {
   store('gemini_key', key);
   $('keymsg').textContent = 'Key saved.';
 };
+
+/* ---------- search (unchanged logic) ---------- */
 
 async function parseRequest(text, key) {
   const prompt =
@@ -296,6 +347,8 @@ function render() {
   const any = results.length > 0 || (showExtras && hasExtras);
   $('csv').classList.toggle('hidden', !any);
   $('copy').classList.toggle('hidden', !any);
+
+  updateOutbox();
 }
 
 let askOpen = false;
@@ -313,11 +366,13 @@ $('go').onclick = async () => {
   store('gemini_key', key);
   $('go').disabled = true;
   results = []; extras = []; showExtras = false; askOpen = false;
+  $('sampleBox').classList.add('hidden');
   render();
 
   try {
     status('Understanding your request...');
     const p = await parseRequest(text, key);
+    lastP = p;
 
     status('Searching for ' + p.type + ' in ' + p.location + '\nTarget: ' + p.limit + '\nFinding the place on the map...');
     const loc = await geocode(p.location);
@@ -367,6 +422,199 @@ $('copy').onclick = async () => {
     status('Copy was blocked by the browser. Use Download CSV instead.', true);
   }
 };
+
+/* ---------- email ---------- */
+
+const DAILY_CAP = 40;
+for (const [id, k] of [['clientId','g_client'],['myName','m_name'],['offer','m_offer']]) {
+  const v = store(k); if (v) $(id).value = v;
+}
+if (!store('g_client')) $('mailbox').open = true;
+
+let gToken = null, gExp = 0, sending = false, stopFlag = false, sample = null, sampleFor = null;
+
+$('connect').onclick = () => {
+  const cid = $('clientId').value.trim();
+  if (!cid) { $('mailmsg').textContent = 'Paste your Google OAuth client ID first.'; return; }
+  store('g_client', cid);
+  if (!(window.google && google.accounts && google.accounts.oauth2)) {
+    $('mailmsg').textContent = 'Google sign-in has not loaded yet. Check your connection and try again.';
+    return;
+  }
+  const tc = google.accounts.oauth2.initTokenClient({
+    client_id: cid,
+    scope: GMAIL_SCOPE,
+    login_hint: SENDER,
+    callback: r => {
+      if (r.error) { $('mailmsg').textContent = 'Gmail connection failed: ' + r.error; return; }
+      gToken = r.access_token;
+      gExp = Date.now() + (Number(r.expires_in || 3600) - 90) * 1000;
+      $('mailmsg').textContent = 'Gmail connected.';
+    },
+    error_callback: e => { $('mailmsg').textContent = 'Gmail connection was cancelled or blocked (' + (e && e.type || 'unknown') + ').'; }
+  });
+  tc.requestAccessToken({ prompt: gToken ? '' : 'consent' });
+};
+
+function sentLog() { try { return JSON.parse(store('sent_log') || '{}'); } catch (e) { return {}; } }
+function saveSent(id) { const l = sentLog(); l[id] = new Date().toISOString(); store('sent_log', JSON.stringify(l)); }
+function todayKey() { return 'sent_count_' + new Date().toISOString().slice(0, 10); }
+function sentToday() { return Number(store(todayKey()) || 0); }
+function bumpToday() { store(todayKey(), String(sentToday() + 1)); }
+
+function firstEmail(s) {
+  return String(s || '').split(/[;,\s]+/).map(x => x.trim()).find(x => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)) || '';
+}
+
+function eligible() {
+  const log = sentLog();
+  const pool = results.concat(showExtras ? extras : []);
+  const seenMail = new Set();
+  const out = [];
+  for (const r of pool) {
+    const to = firstEmail(r.email);
+    if (!to || log[r.osmId] || seenMail.has(to.toLowerCase())) continue;
+    seenMail.add(to.toLowerCase());
+    out.push({ biz: r, to });
+  }
+  return out;
+}
+
+function updateOutbox() {
+  const n = eligible().length;
+  $('outbox').classList.toggle('hidden', !n && !sending);
+  $('outTitle').textContent = 'Email these businesses (' + n + ' with an email, not yet contacted)';
+  if (!sending) $('previewBtn').disabled = !n;
+}
+
+function signature() {
+  return '\n\nThanks,\n' + $('myName').value.trim() +
+    '\n\nIf you would rather not get emails from me, just reply "no" and I will not write again.';
+}
+
+async function writeOne(biz) {
+  const key = ($('key').value || '').trim();
+  const name = $('myName').value.trim();
+  const offer = $('offer').value.trim();
+  const where = lastP ? lastP.location : '';
+  const prompt =
+    'Write a short first-contact email from a real person named ' + name + ' to a local business.\n' +
+    'What the sender wants to say or offer: ' + offer + '\n' +
+    'The business: name "' + biz.name + '", type "' + biz.category + '"' + (where ? ', area "' + where + '"' : '') + '.\n' +
+    'The only thing known about them: no website was found for them on OpenStreetMap, so it may be out of date.\n\n' +
+    'Rules:\n' +
+    '- Plain text, 55 to 90 words, one short paragraph or two.\n' +
+    '- Sound like a normal person typing a quick note. Everyday words. Contractions are fine.\n' +
+    '- No exclamation marks, no em dashes, no bullet points, no emojis, no bold.\n' +
+    '- Never use: "I hope this finds you well", "reach out", "I came across", "game-changer", "unlock", "elevate", "streamline", "leverage", "tailored", "solutions", "in today\'s digital world".\n' +
+    '- Do not invent anything about the business, do not praise them generically, do not pretend you visited or used their service.\n' +
+    '- Be upfront that you are writing cold and why. Say what the sender offers in one plain sentence. End with one easy yes or no question.\n' +
+    '- Start with "Hi," or "Hello,". Do NOT write a sign-off or the sender name, it is added separately. Do not include phone numbers.\n' +
+    '- Subject: 2 to 5 words, lowercase, plain, specific to them. No "Re:" or fake urgency.\n' +
+    'Vary the wording so it does not read like a template.';
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 1.0,
+      responseMimeType: 'application/json',
+      responseSchema: { type: 'OBJECT', properties: { subject: { type: 'STRING' }, body: { type: 'STRING' } }, required: ['subject', 'body'] }
+    }
+  };
+  const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + MODEL + ':generateContent', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error('Gemini error ' + res.status);
+  const j = await res.json();
+  const o = JSON.parse(j.candidates[0].content.parts[0].text);
+  return { subject: String(o.subject).replace(/[\r\n]+/g, ' ').trim(), body: String(o.body).trim().replace(/—/g, ',') + signature() };
+}
+
+async function showSample() {
+  if (!($('key').value || '').trim()) return $('outmsg').textContent = 'Add your Gemini key first.';
+  if (!$('myName').value.trim()) return $('outmsg').textContent = 'Type your name first.';
+  if (!$('offer').value.trim()) return $('outmsg').textContent = 'Tell me what you want to add first.';
+  store('m_name', $('myName').value.trim());
+  store('m_offer', $('offer').value.trim());
+  const list = eligible();
+  if (!list.length) return $('outmsg').textContent = 'No businesses with an email left to contact.';
+  $('previewBtn').disabled = true; $('noBtn').disabled = true;
+  $('outmsg').textContent = 'Writing a sample...';
+  try {
+    sampleFor = list[0];
+    sample = await writeOne(sampleFor.biz);
+    $('sampleHead').textContent = 'Sample, written for ' + sampleFor.biz.name + '. Every business gets its own version in the same style.';
+    $('sampleSubj').textContent = 'Subject: ' + sample.subject;
+    $('sampleBody').textContent = sample.body;
+    $('sampleBox').classList.remove('hidden');
+    $('outmsg').textContent = '';
+  } catch (e) {
+    $('outmsg').textContent = 'Could not write the email: ' + (e.message || e);
+  }
+  $('previewBtn').disabled = false; $('noBtn').disabled = false;
+}
+$('previewBtn').onclick = showSample;
+$('noBtn').onclick = showSample;
+
+function b64(bytes) { let s = ''; for (const b of bytes) s += String.fromCharCode(b); return btoa(s); }
+function encHeader(s) { return /^[\x20-\x7e]*$/.test(s) ? s : '=?UTF-8?B?' + b64(new TextEncoder().encode(s)) + '?='; }
+function rawMessage(to, subject, body) {
+  const bodyB64 = b64(new TextEncoder().encode(body.replace(/\r?\n/g, '\r\n'))).replace(/(.{76})/g, '$1\r\n');
+  const msg = 'To: ' + to + '\r\nSubject: ' + encHeader(subject) + '\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset="UTF-8"\r\nContent-Transfer-Encoding: base64\r\n\r\n' + bodyB64;
+  return b64(new TextEncoder().encode(msg)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function sendOne(to, m) {
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + gToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ raw: rawMessage(to, m.subject, m.body) })
+  });
+  if (res.status === 401) throw Object.assign(new Error('Gmail session expired'), { auth: true });
+  if (!res.ok) throw new Error('Gmail error ' + res.status + ' ' + (await res.text()).slice(0, 200));
+}
+
+function wait(ms) {
+  return new Promise(resolve => {
+    const end = Date.now() + ms;
+    const t = setInterval(() => { if (stopFlag || Date.now() >= end) { clearInterval(t); resolve(); } }, 500);
+  });
+}
+
+$('yesBtn').onclick = async () => {
+  if (sending) return;
+  if (!gToken || Date.now() > gExp) { $('mailbox').open = true; return $('outmsg').textContent = 'Connect Gmail first (Gmail connection), then press "Yes, send to all" again.'; }
+  const room = DAILY_CAP - sentToday();
+  if (room <= 0) return $('outmsg').textContent = 'Daily limit of ' + DAILY_CAP + ' emails reached. Continue tomorrow.';
+  const batch = eligible().slice(0, room);
+  if (!batch.length) return;
+
+  sending = true; stopFlag = false;
+  $('sampleBox').classList.add('hidden');
+  $('previewBtn').disabled = true; $('stopBtn').classList.remove('hidden');
+  let sent = 0, failed = 0;
+  for (let i = 0; i < batch.length; i++) {
+    if (stopFlag) break;
+    if (Date.now() > gExp) { $('outmsg').textContent = 'Gmail session expired after ' + sent + ' sent. Connect again, then press "Show me the email" to continue.'; break; }
+    const item = batch[i];
+    $('outmsg').textContent = 'Sending ' + (i + 1) + ' of ' + batch.length + ' to ' + item.biz.name + '...\nSent: ' + sent + (failed ? '   Failed: ' + failed : '');
+    try {
+      const m = (sampleFor && sampleFor.biz.osmId === item.biz.osmId && sample) ? sample : await writeOne(item.biz);
+      await sendOne(item.to, m);
+      saveSent(item.biz.osmId); bumpToday(); sent++;
+    } catch (e) {
+      if (e.auth) { $('outmsg').textContent = 'Gmail session expired after ' + sent + ' sent. Connect again, then continue.'; break; }
+      failed++;
+    }
+    if (i < batch.length - 1) await wait(25000 + Math.random() * 45000);
+  }
+  sending = false;
+  $('stopBtn').classList.add('hidden');
+  if (!/expired/.test($('outmsg').textContent)) $('outmsg').textContent = (stopFlag ? 'Stopped. ' : 'Done. ') + sent + ' sent' + (failed ? ', ' + failed + ' failed' : '') + '. Sent today: ' + sentToday() + ' of ' + DAILY_CAP + '.';
+  sample = null; sampleFor = null;
+  updateOutbox();
+};
+
+$('stopBtn').onclick = () => { stopFlag = true; };
 </script>
 </body>
 </html>
